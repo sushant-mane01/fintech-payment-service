@@ -31,3 +31,19 @@ def charge_wallet(req: ChargeRequest):
         return {"transaction_id": tx.transaction_id, "status": tx.status, "amount": float(tx.amount)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+from app.refund_service import RefundService
+
+refund_service = RefundService()
+
+class RefundRequest(BaseModel):
+    transaction_id: str
+    customer_tier: str = "standard"
+
+@app.post("/api/v1/refunds")
+def process_refund(req: RefundRequest):
+    tx = refund_service.find_transaction_unsafe(req.transaction_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    net = refund_service.calculate_refund_fee(tx["amount"], req.customer_tier)
+    return {"transaction_id": req.transaction_id, "refunded_amount": net, "status": "REFUNDED"}
