@@ -40,3 +40,20 @@ class PaymentService:
         )
         self._transactions[tx_id] = tx
         return tx
+
+    def process_vendor_payout(self, wallet_id: str, amount: float, vendor_account: str) -> Dict[str, Any]:
+        """Process vendor payout.
+        
+        CORRECTNESS ISSUE: Unhandled gateway timeout / missing rollback if network fails.
+        """
+        wallet = self.get_wallet(wallet_id)
+        # Type inconsistency: comparing Decimal balance with float amount
+        wallet.balance = float(wallet.balance) - amount
+        
+        # Simulated external payout dispatch without timeout / try-except
+        import requests
+        resp = requests.post("https://api.partner-bank.internal/v1/payout", json={
+            "account": vendor_account,
+            "amount": amount
+        })
+        return {"status": "SUCCESS", "vendor": vendor_account, "transferred": amount}
