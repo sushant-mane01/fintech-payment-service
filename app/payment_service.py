@@ -1,42 +1,103 @@
-import uuid
+from fastapi import HTTPException, Depends
+from sqlalchemy.orm import Session
 from decimal import Decimal
-from datetime import datetime
-from typing import Dict, Optional
-from app.models import Wallet, Transaction
+
+from .models import Wallet, Transaction, TransactionStatus
+from .schemas import (
+    WalletCreate,
+    WalletResponse,
+    ChargeRequest,
+    TransactionResponse,
+    RefundRequest,
+)
+from .database import get_db
 
 class PaymentService:
-    def __init__(self):
-        self._wallets: Dict[str, Wallet] = {}
-        self._transactions: Dict[str, Transaction] = {}
+    def __init__(self, db: Session = Depends(get_db)):
+        self.db = db
 
-    def create_wallet(self, customer_id: str, initial_balance: Decimal = Decimal("0.00")) -> Wallet:
-        wallet_id = f"wal_{uuid.uuid4().hex[:12]}"
-        wallet = Wallet(wallet_id=wallet_id, customer_id=customer_id, balance=initial_balance)
-        self._wallets[wallet_id] = wallet
-        return wallet
+    # ---------------------------------------------------------------------
+    # Existing wallet & charge logic (unchanged – shown for context only)
+    # ---------------------------------------------------------------------
+    def create_wallet(self, payload: WalletCreate) -> WalletResponse:
+        wallet = Wallet(balance=payload.initial_balance)
+        self.db.add(wallet)
+        self.db.commit()
+        self.db.refresh(wallet)
+        return WalletResponse.from_orm(wallet)
 
-    def get_wallet(self, wallet_id: str) -> Optional[Wallet]:
-        return self._wallets.get(wallet_id)
-
-    def process_charge(self, wallet_id: str, amount: Decimal, description: str = "") -> Transaction:
-        wallet = self.get_wallet(wallet_id)
+    def process_charge(self, payload: ChargeRequest) -> TransactionResponse:
+        wallet = self.db.query(Wallet).filter(Wallet.id == payload.wallet_id).first()
         if not wallet:
-            raise ValueError(f"Wallet {wallet_id} not found.")
-        if not wallet.is_active:
-            raise ValueError("Wallet is inactive.")
-        if wallet.balance < amount:
-            raise ValueError("Insufficient balance.")
+            raise HTTPException(status_code=404, detail="Wallet not found")
+        if wallet.balance < payload.amount:
+            raise HTTPException(status_code=400, detail="Insufficient funds")
 
-        wallet.balance -= amount
-        tx_id = f"tx_{uuid.uuid4().hex[:12]}"
-        tx = Transaction(
-            transaction_id=tx_id,
-            wallet_id=wallet_id,
-            amount=amount,
-            currency=wallet.currency,
-            status="COMPLETED",
-            created_at=datetime.utcnow(),
-            description=description,
+        wallet.balance -= payload.amount
+        transaction = Transaction(
+            wallet_id=wallet.id,
+            amount=payload.amount,
+            status=TransactionStatus.COMPLETED,
         )
-        self._transactions[tx_id] = tx
-        return tx
+        self.db.add_all([wallet, transaction])
+        self.db.commit()
+        self.db.refresh(transaction)
+        return TransactionResponse.from_orm(transaction)
+
+    # ---------------------------------------------------------------------
+    # New refund logic
+    # ---------------------------------------------------------------------
+    def process_refund(self, payload: RefundRequest) -> TransactionResponse:
+        """Create a refund for a previously COMPLETED transaction.
+
+        Steps:
+        1. Retrieve the original transaction; error 404 if missing.
+        2. Verify its status is COMPLETED; error 400 otherwise.
+        3. Credit the original amount back to the associated wallet.
+        4. Record a new Transaction with status REFUNDED and a link to the
+           original transaction via ``parent_transaction_id``.
+        5. Return the newly created refund transaction.
+        """
+        # 1. Load original transaction
+        original_tx = (
+            self.db.query(Transaction)
+            .filter(Transaction.id == payload.transaction_id)
+            .first()
+        )
+        if not original_tx:
+            raise HTTPException(status_code=404, detail="Original transaction not found")
+
+        # 2. Validate status
+        if original_tx.status != TransactionStatus.COMPLETED:
+            raise HTTPException(
+                status_code=400,
+                detail="Only COMPLETED transactions can be refunded",
+            )
+
+        # 3. Credit wallet
+        wallet = (
+            self.db.query(Wallet)
+            .filter(Wallet.id == original_tx.wallet_id)
+            .with_for_update()
+            .first()
+        )
+        if not wallet:
+            # This should never happen if DB integrity is maintained
+            raise HTTPException(status_code=500, detail="Associated wallet not found")
+
+        wallet.balance += original_tx.amount
+
+        # 4. Create refund transaction
+        refund_tx = Transaction(
+            wallet_id=wallet.id,
+            amount=original_tx.amount,
+            status=TransactionStatus.REFUNDED,
+            parent_transaction_id=original_tx.id,
+        )
+
+        # 5. Persist changes atomically
+        self.db.add_all([wallet, refund_tx])
+        self.db.commit()
+        self.db.refresh(refund_tx)
+
+        return TransactionResponse.from_orm(refund_tx)
