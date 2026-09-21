@@ -1,33 +1,48 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from decimal import Decimal
-from app.payment_service import PaymentService
+from fastapi import FastAPI, Depends
+from fastapi.routing import APIRouter
+from .payment_service import PaymentService
+from .schemas import (
+    WalletCreate,
+    WalletResponse,
+    ChargeRequest,
+    TransactionResponse,
+    RefundRequest,
+)
 
-app = FastAPI(title="Fintech Payment Service", version="1.0.0")
-payment_service = PaymentService()
+app = FastAPI(title="Payment Service")
+router = APIRouter()
 
-class CreateWalletRequest(BaseModel):
-    customer_id: str
-    initial_balance: float = 0.0
+# ---------------------------------------------------------------------
+# Wallet endpoints (unchanged – shown for context only)
+# ---------------------------------------------------------------------
+@router.post("/api/v1/wallets", response_model=WalletResponse, status_code=201)
+async def create_wallet(payload: WalletCreate, service: PaymentService = Depends()):
+    return service.create_wallet(payload)
 
-class ChargeRequest(BaseModel):
-    wallet_id: str
-    amount: float
-    description: str = ""
+# ---------------------------------------------------------------------
+# Charge endpoint (unchanged – shown for context only)
+# ---------------------------------------------------------------------
+@router.post("/api/v1/charges", response_model=TransactionResponse, status_code=201)
+async def create_charge(payload: ChargeRequest, service: PaymentService = Depends()):
+    return service.process_charge(payload)
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "service": "payment-service"}
+# ---------------------------------------------------------------------
+# Refund endpoint – new implementation per SCRUM‑5
+# ---------------------------------------------------------------------
+@router.post(
+    "/api/v1/refunds",
+    response_model=TransactionResponse,
+    status_code=201,
+    summary="Create a refund for a completed transaction",
+)
+async def create_refund(
+    payload: RefundRequest, service: PaymentService = Depends()
+) -> TransactionResponse:
+    """Refund a previously COMPLETED transaction.
 
-@app.post("/api/v1/wallets")
-def create_wallet(req: CreateWalletRequest):
-    wallet = payment_service.create_wallet(req.customer_id, Decimal(str(req.initial_balance)))
-    return {"wallet_id": wallet.wallet_id, "balance": float(wallet.balance), "currency": wallet.currency}
+    The endpoint expects a JSON body like ``{"transaction_id": 123}``.
+    It returns the newly created refund transaction (status ``REFUNDED``).
+    """
+    return service.process_refund(payload)
 
-@app.post("/api/v1/charges")
-def charge_wallet(req: ChargeRequest):
-    try:
-        tx = payment_service.process_charge(req.wallet_id, Decimal(str(req.amount)), req.description)
-        return {"transaction_id": tx.transaction_id, "status": tx.status, "amount": float(tx.amount)}
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+app.include_router(router)
