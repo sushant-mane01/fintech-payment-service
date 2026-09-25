@@ -1,8 +1,14 @@
 import uuid
+import os
 from decimal import Decimal
 from datetime import datetime
 from typing import Dict, Optional
 from app.models import Wallet, Transaction
+
+try:
+    import stripe
+except ImportError:
+    stripe = None
 
 class PaymentService:
     def __init__(self):
@@ -40,3 +46,41 @@ class PaymentService:
         )
         self._transactions[tx_id] = tx
         return tx
+
+    def create_stripe_checkout_session(self, wallet_id: str, amount: float, currency: str, success_url: str, cancel_url: str) -> dict:
+        """
+        Creates a Stripe Checkout Session for the specified wallet and amount.
+        """
+        if stripe is None:
+            raise RuntimeError("Stripe library not installed.")
+            
+        api_key = os.getenv('STRIPE_SECRET_KEY')
+        if not api_key:
+            raise RuntimeError("STRIPE_SECRET_KEY environment variable is not set.")
+            
+        stripe.api_key = api_key
+        
+        try:
+            session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{
+                    'price_data': {
+                        'currency': currency,
+                        'unit_amount': int(amount * 100),
+                        'product_data': {
+                            'name': 'Wallet Payment',
+                        },
+                    },
+                    'quantity': 1,
+                }],
+                mode='payment',
+                success_url=success_url,
+                cancel_url=cancel_url,
+                metadata={'wallet_id': wallet_id},
+            )
+            return {
+                "session_id": session.id,
+                "url": session.url
+            }
+        except stripe.error.StripeError as e:
+            raise e
